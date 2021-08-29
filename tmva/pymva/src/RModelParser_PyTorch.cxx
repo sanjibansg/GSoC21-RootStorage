@@ -1,44 +1,220 @@
+// @(#)root/tmva/pymva $Id$
+// Author: Sanjiban Sengupta 2021
+
+/**********************************************************************************
+ * Project : TMVA - a Root-integrated toolkit for multivariate data analysis      *
+ * Package : TMVA                                                                 *
+ * Function: TMVA::Experimental::SOFIE::PyTorch::Parse                            *
+ *                                                                                *
+ * Description:                                                                   *
+ *      Parser function for translating PyTorch .pt model to RModel object        *
+ *                                                                                *
+ * Example Usage:                                                                 *
+ * ~~~ {.cpp}                                                                     *
+ * using TMVA::Experimental::SOFIE;                                               *
+ * // Building the vector of input tensor shapes                                  *
+ * std::vector<size_t> s1{120,1};                                                 *
+ * std::vector<std::vector<size_t>> inputShape{s1};                               *
+ * RModel model = PyTorch::Parse("trained_model_dense.pt",inputShape);            *
+ * ~~~                                                                            *
+ *                                                                                *
+ **********************************************************************************/
+
+
 #include "TMVA/RModelParser_PyTorch.h"
 
 
 namespace TMVA{
 namespace Experimental{
 namespace SOFIE{
-
-std::unordered_map<std::string, NodeType> NType =
-    {
-        {"'onnx::Gemm'", NodeType::GEMM},
-        {"'onnx::Relu'", NodeType::RELU},
-        {"'onnx::Transpose'", NodeType::TRANSPOSE}
-    };
-
-
 namespace PyTorch{
 
-void PyRunString(TString code, PyObject *fGlobalNS, PyObject *fLocalNS){
-   PyObject *fPyReturn = PyRun_String(code, Py_single_input, fGlobalNS, fLocalNS);
-   if (!fPyReturn) {
-      std::cout<<"Python error message:\n";
-      PyErr_Print();
-      throw std::runtime_error("Failed to run python code: "+code);
-   }
- }
+namespace INTERNAL{
 
-const char* PyStringAsString(PyObject* str){
-   #if PY_MAJOR_VERSION < 3   // for Python2
-      const char *stra_name = PyBytes_AsString(str);
-      // need to add string delimiter for Python2
-      TString sname = TString::Format("'%s'",stra_name);
-      const char * name = sname.Data();
-   #else   // for Python3
-      PyObject* repr = PyObject_Repr(str);
-      PyObject* stra = PyUnicode_AsEncodedString(repr, "utf-8", "~E~");
-      const char *name = PyBytes_AsString(stra);
-   #endif
-return name;
+//////////////////////////////////////////////////////////////////////////////////
+/// \brief Prepares equivalent ROperator with respect to PyTorch ONNX node.
+///
+/// \param[in] fNode Python PyTorch ONNX Graph Node
+/// \return unique pointer to ROperator object
+///r
+/// Function searches for the passed PyTorch ONNX Graph node in the map, and calls
+/// the specific preparatory function, subsequently returning the ROperator object.
+///
+/// For developing new preparatory functions for supporting PyTorch ONNX Graph nodes
+/// in future,  all one needs is to extract the required properties and attributes
+/// from the fNode dictionary which contains all the information about any PyTorch ONNX
+//  Graph Node and after any required transformations, these are passed for instantiating
+/// the ROperator object.
+///
+/// The fNode dictionary which holds all the information about a PyTorch ONNX Graph's Node has
+/// following structure:-
+/// dict fNode {  'nodeType'        : Type of Operator Node
+///               'nodeAttributes'  : Attributes of the operator Node
+///               'nodeInputs'      : List of names of input tensors
+///               'nodeOutputs'     : List of names of output tensors
+///               'nodeDType'       : Data-type of the operator Node
+///             }
+std::unique_ptr<ROperator> MakePyTorchNode(PyObject* fNode){
+        std::string fNodeType = PyStringAsString(PyDict_GetItemString(fNode,"nodeType"));
+        auto findNode = mapPyTorchNode.find(fNodeType);
+        if(findNode == mapPyTorchNode.end()){
+            throw std::runtime_error("TMVA::SOFIE - Parsing PyTorch node " +fNodeType+" is not yet supported ");
+        }
+        return (findNode->second)(fNode);
 }
 
 
+//////////////////////////////////////////////////////////////////////////////////
+/// \brief Prepares a ROperator_Gemm object
+///
+/// \param[in] fNode Python PyTorch ONNX Graph Node
+/// \return Unique pointer to ROperator object
+///
+/// For PyTorch's Linear layer having Gemm operation in its ONNX graph,
+/// the names of the input tensor, output tensor are extracted, and then
+/// are passed to instantiate a ROperator_Gemm object using the required attributes.
+/// fInputs is a list of tensor names, which includes the names of the input tensor
+/// and the weight tensors.
+std::unique_ptr<ROperator> MakePyTorchGemm(PyObject* fNode){
+        PyObject* fAttributes   = PyDict_GetItemString(fNode,"nodeAttributes");
+        PyObject* fInputs       = PyDict_GetItemString(fNode,"nodeInputs");
+        PyObject* fOutputs      = PyDict_GetItemString(fNode,"nodeOutputs");
+        std::string fNodeDType  = PyStringAsString(PyList_GetItem(PyDict_GetItemString(fNode,"nodeDType"),0));
+
+        // Extracting the attributes of Gemm Operator
+        float attr_alpha = (float)(PyFloat_AsDouble(PyDict_GetItemString(fAttributes,"alpha")));
+        float attr_beta = (float)(PyFloat_AsDouble(PyDict_GetItemString(fAttributes,"beta")));
+        int_t attr_transA;
+        int_t attr_transB;
+
+        if(PyDict_Contains(fAttributes,PyUnicode_FromString("transB"))){
+            attr_transB=(int_t)(PyLong_AsLong(PyDict_GetItemString(fAttributes,"transB")));
+            attr_transA=!attr_transB;
+        }
+        else{
+            attr_transA=(int_t)(PyLong_AsLong(PyDict_GetItemString(fAttributes,"transA")));
+            attr_transB=!attr_transA;
+        }
+
+        std::unique_ptr<ROperator> op;
+        switch(ConvertStringToType(fNodeDType)){
+            case ETensorType::FLOAT: {
+                op.reset(new ROperator_Gemm<float>(attr_alpha, attr_beta, attr_transA, attr_transB, PyStringAsString(PyList_GetItem(fInputs,0)), PyStringAsString(PyList_GetItem(fInputs,1)), PyStringAsString(PyList_GetItem(fInputs,2)), PyStringAsString(PyList_GetItem(fOutputs,0))));
+                break;
+                }
+                default:
+                    throw std::runtime_error("TMVA::SOFIE - Unsupported - Operator Gemm does not yet support input type " + fNodeDType);
+                }
+        return op;
+}
+
+//////////////////////////////////////////////////////////////////////////////////
+/// \brief Prepares a ROperator_Relu object
+///
+/// \param[in] fNode Python PyTorch ONNX Graph Node
+/// \return Unique pointer to ROperator object
+///
+/// For instantiating a ROperator_Relu object, the names of
+/// input & output tensors and the data-type of the Graph node
+/// are extracted.
+std::unique_ptr<ROperator> MakePyTorchRelu(PyObject* fNode){
+        PyObject* fInputs       = PyDict_GetItemString(fNode,"nodeInputs");
+        PyObject* fOutputs      = PyDict_GetItemString(fNode,"nodeOutputs");
+        std::string fNodeDType  = PyStringAsString(PyList_GetItem(PyDict_GetItemString(fNode,"nodeDType"),0));
+
+        std::unique_ptr<ROperator> op;
+        switch(ConvertStringToType(fNodeDType)){
+            case ETensorType::FLOAT: {
+                op.reset(new ROperator_Relu<float>(PyStringAsString(PyList_GetItem(fInputs,0)), PyStringAsString(PyList_GetItem(fOutputs,0))));
+                break;
+                }
+                default:
+                throw std::runtime_error("TMVA::SOFIE - Unsupported - Operator Relu does not yet support input type " + fNodeDType);
+        }
+        return op;
+}
+
+
+//////////////////////////////////////////////////////////////////////////////////
+/// \brief Prepares a ROperator_Transpose object
+///
+/// \param[in] fNode Python PyTorch ONNX Graph Node
+/// \return Unique pointer to ROperator object
+///
+/// For Transpose Operator of PyTorch's ONNX Graph, the permute dimensions are found,
+/// and are passed in instantiating the ROperator object.
+std::unique_ptr<ROperator> MakePyTorchTranspose(PyObject* fNode){
+        PyObject* fAttributes   = PyDict_GetItemString(fNode,"nodeAttributes");
+        PyObject* fInputs       = PyDict_GetItemString(fNode,"nodeInputs");
+        PyObject* fOutputs      = PyDict_GetItemString(fNode,"nodeOutputs");
+        std::string fNodeDType  = PyStringAsString(PyList_GetItem(PyDict_GetItemString(fNode,"nodeDType"),0));
+
+        // Extracting the Permute dimensions for transpose
+        std::vector<int_t> fAttributePermute;
+        PyObject* fPermute=PyDict_GetItemString(fAttributes,"perm");
+        for(Py_ssize_t permIter=0; permIter<PyList_Size(fPermute);++permIter){
+            fAttributePermute.push_back((int_t)PyLong_AsLong(PyList_GetItem(fPermute,permIter)));
+        }
+
+        std::unique_ptr<ROperator> op;
+        switch(ConvertStringToType(fNodeDType)){
+            case ETensorType::FLOAT: {
+                op.reset(new ROperator_Transpose<float>(fAttributePermute, PyStringAsString(PyList_GetItem(fInputs,0)), PyStringAsString(PyList_GetItem(fOutputs,0))));
+                break;
+            }
+            default:
+            throw std::runtime_error("TMVA::SOFIE - Unsupported - Operator Transpose does not yet support input type " + fNodeDType);
+        }
+        return op;
+}
+}//INTERNAL
+
+
+//////////////////////////////////////////////////////////////////////////////////
+/// \brief Parser function for translating PyTorch .pt model to RModel object
+///
+/// \param[in] filename file location of PyTorch .pt model
+/// \param[in] inputShapes vector of input shape vectors
+/// \param[in] inputDTypes vector of ETensorType for data-types of Input tensors
+/// \return    RModel Parsed RModel object
+///
+/// The `Parse()` function defined in `TMVA::Experimental::SOFIE::PyTorch` will
+/// parse a trained PyTorch .pt model into a RModel Object. The parser uses
+/// internal functions of PyTorch to convert any PyTorch model into its
+/// equivalent ONNX Graph. For this conversion, dummy inputs are built which are
+/// passed through the model and the applied operators are recorded for populating
+/// the ONNX graph. The `Parse()` function requires the shapes and data-types of
+/// the input tensors which are used for building the dummy inputs.
+/// After the said conversion, the nodes of the ONNX graph are then traversed to
+/// extract properties like Node type, Attributes, input & output tensor names.
+/// Function `AddOperator()` is then called on the extracted nodes to add the
+/// operator into the RModel object. The nodes are also checked for adding any
+/// required routines for executing the generated Inference code.
+///
+/// The internal function used to convert the model to graph object returns a list
+/// which contains a Graph object and a dictionary of weights. This dictionary is
+/// used to extract the Initialized tensors for the model. The names and data-types
+/// of the Initialized tensors are extracted along with their values in NumPy array,
+/// and after approapriate type-conversions, they are added into the RModel object.
+///
+/// For adding the Input tensor infos, the names of the input tensors are extracted
+/// from the PyTorch ONNX graph object. The vector of shapes & data-types passed
+/// into the `Parse()` function are used to extract the data-type and the shape
+/// of the input tensors. Extracted input tensor infos are then added into the
+/// RModel object by calling the `AddInputTensorInfo()` function.
+///
+/// For the output tensor infos, names of the output tensors are also extracted
+/// from the Graph object and are then added into the RModel object by calling the
+/// AddOutputTensorNameList() function.
+///
+/// Example Usage:
+/// ~~~ {.cpp}
+/// using TMVA::Experimental::SOFIE;
+/// //Building the vector of input tensor shapes
+/// std::vector<size_t> s1{120,1};
+/// std::vector<std::vector<size_t>> inputShape{s1};
+/// RModel model = PyTorch::Parse("trained_model_dense.pt",inputShape);
+/// ~~~
 RModel Parse(std::string filename, std::vector<std::vector<size_t>> inputShapes, std::vector<ETensorType> inputDTypes){
 
     char sep = '/';
@@ -52,7 +228,7 @@ RModel Parse(std::string filename, std::vector<std::vector<size_t>> inputShapes,
       filename_nodir = (filename.substr(isep+1, filename.length() - isep));
     }
 
-    //Check on whether the ONNX file exists
+    //Check on whether the PyTorch .pt file exists
     if(!std::ifstream(filename).good()){
         throw std::runtime_error("Model file "+filename_nodir+" not found!");
     }
@@ -80,7 +256,6 @@ RModel Parse(std::string filename, std::vector<std::vector<size_t>> inputShapes,
     //Extracting model information
     //Model is converted to ONNX graph format
     //using PyTorch's internal function with the input shape provided
-    PyRunString("globals().update(locals())",fGlobalNS,fLocalNS);
     PyRunString("import torch",fGlobalNS,fLocalNS);
     PyRunString("print('Torch Version: '+torch.__version__)",fGlobalNS,fLocalNS);
     PyRunString("from torch.onnx.utils import _model_to_graph",fGlobalNS,fLocalNS);
@@ -115,131 +290,41 @@ RModel Parse(std::string filename, std::vector<std::vector<size_t>> inputShapes,
     PyRunString("graph=_model_to_graph(model,dummyInputs,example_outputs=output)",fGlobalNS,fLocalNS);
 
 
-    //Extracting Input tensor info
-    PyRunString("inputs=[x for x in model.graph.inputs()]",fGlobalNS,fLocalNS);
-    PyRunString("inputs=inputs[1:]",fGlobalNS,fLocalNS);
-    PyRunString("inputNames=[x.debugName() for x in inputs]",fGlobalNS,fLocalNS);
-    PyObject* fPInputs= PyDict_GetItemString(fLocalNS,"inputNames");
-    std::string fInputName;
-    std::vector<size_t>fInputShape;
-    ETensorType fInputDType;
-    for(Py_ssize_t inputIter=0; inputIter<PyList_Size(fPInputs);++inputIter){
-        fInputName  = PyStringAsString(PyList_GetItem(fPInputs,inputIter));
-        fInputShape = inputShapes[inputIter];
-        fInputDType = inputDTypes[inputIter];
-        switch(fInputDType){
-            case(ETensorType::FLOAT): {
-                rmodel.AddInputTensorInfo(fInputName, ETensorType::FLOAT, fInputShape);
-                break;
-            }
-            default:
-                throw std::runtime_error("Type Error: TMVA SOFIE does not yet support the input tensor data type"+ConvertTypeToString(fInputDType));
-        }
-        }
-
-
     //Extracting the model information in list modelData
     PyRunString("modelData=[]",fGlobalNS,fLocalNS);
     PyRunString("for i in graph[0].nodes():\n"
                 "    globals().update(locals())\n"
-                "    nodeData=[]\n"
-                "    nodeData.append(i.kind())\n"
+                "    nodeData={}\n"
+                "    nodeData['nodeType']=i.kind()\n"
                 "    nodeAttributeNames=[x for x in i.attributeNames()]\n"
                 "    nodeAttributes={j:i[j] for j in nodeAttributeNames}\n"
-                "    nodeData.append(nodeAttributes)\n"
+                "    nodeData['nodeAttributes']=nodeAttributes\n"
                 "    nodeInputs=[x for x in i.inputs()]\n"
                 "    nodeInputNames=[x.debugName() for x in nodeInputs]\n"
-                "    nodeData.append(nodeInputNames)\n"
+                "    nodeData['nodeInputs']=nodeInputNames\n"
                 "    nodeOutputs=[x for x in i.outputs()]\n"
                 "    nodeOutputNames=[x.debugName() for x in nodeOutputs]\n"
-                "    nodeData.append(nodeOutputNames)\n"
+                "    nodeData['nodeOutputs']=nodeOutputNames\n"
                 "    nodeDType=[x.type().scalarType() for x in nodeOutputs]\n"
-                "    nodeData.append(nodeDType)\n"
+                "    nodeData['nodeDType']=nodeDType\n"
                 "    modelData.append(nodeData)",fGlobalNS,fLocalNS);
 
     PyObject* fPModel = PyDict_GetItemString(fLocalNS,"modelData");
     Py_ssize_t fPModelSize = PyList_Size(fPModel);
-    PyObject *fNode,*fAttributes,*fInputs,*fOutputs;
+    PyObject *fNode;
     std::string fNodeType;
-    ETensorType fNodeDType;
+
+    //Adding operators into the RModel object
     for(Py_ssize_t fModelIterator=0;fModelIterator<fPModelSize;++fModelIterator){
         fNode     = PyList_GetItem(fPModel,fModelIterator);
-        fNodeType = PyStringAsString(PyList_GetItem(fNode,0));
+        fNodeType = PyStringAsString(PyDict_GetItemString(fNode,"nodeType"));
 
-        if(NType.find(fNodeType)==NType.end())
-            throw std::runtime_error("Layer error: TMVA SOFIE does not yet suppport layer type"+fNodeType);
-
-        fAttributes = PyList_GetItem(fNode,1);
-        fInputs     = PyList_GetItem(fNode,2);
-        fOutputs    = PyList_GetItem(fNode,3);
-        fNodeDType  = ConvertStringToType(PyStringAsString(PyList_GetItem(PyList_GetItem(fNode,4),0)));
-
-        switch(NType.find(fNodeType)->second){
-            case NodeType::GEMM : {
-                float attr_alpha = (float)(PyFloat_AsDouble(PyDict_GetItemString(fAttributes,"alpha")));
-                float attr_beta = (float)(PyFloat_AsDouble(PyDict_GetItemString(fAttributes,"beta")));
-                int_t attr_transA;
-                int_t attr_transB;
-
-                if(PyDict_Contains(fAttributes,PyUnicode_FromString("transB"))){
-                         attr_transB=(int_t)(PyLong_AsLong(PyDict_GetItemString(fAttributes,"transB")));
-                         attr_transA=!attr_transB;
-                    }
-                else{
-                        attr_transA=(int_t)(PyLong_AsLong(PyDict_GetItemString(fAttributes,"transA")));
-                        attr_transB=!attr_transA;
-                    }
-                switch(fNodeDType){
-                case ETensorType::FLOAT: {
-                    std::unique_ptr<ROperator> op;
-                    op.reset(new ROperator_Gemm<float>(attr_alpha, attr_beta, attr_transA, attr_transB, PyStringAsString(PyList_GetItem(fInputs,0)), PyStringAsString(PyList_GetItem(fInputs,1)), PyStringAsString(PyList_GetItem(fInputs,2)), PyStringAsString(PyList_GetItem(fOutputs,0))));
-                    rmodel.AddOperator(std::move(op));
-                    break;
-                    }
-                default:
-                    throw std::runtime_error("TMVA::SOFIE - Unsupported - Operator Gemm does not yet support input type " + ConvertTypeToString(fNodeDType));
-
-                }
-                break;
-                }
-
-            case NodeType::RELU : {
-                switch(fNodeDType){
-                    case ETensorType::FLOAT: {
-                        std::unique_ptr<ROperator> op;
-                        op.reset(new ROperator_Relu<float>(PyStringAsString(PyList_GetItem(fInputs,0)), PyStringAsString(PyList_GetItem(fOutputs,0))));
-                        rmodel.AddOperator(std::move(op));
-                        break;
-                    }
-                    default:
-                    throw std::runtime_error("TMVA::SOFIE - Unsupported - Operator Relu does not yet support input type " + ConvertTypeToString(fNodeDType));
-                }
-                break;
-                }
-
-            case NodeType::TRANSPOSE:{
-                std::vector<int_t> fAttributePermute;
-                PyObject* fPPermute=PyDict_GetItemString(fAttributes,"perm");
-                for(Py_ssize_t permIter=0; permIter<PyList_Size(fPPermute);++permIter){
-                    fAttributePermute.push_back((int_t)PyLong_AsLong(PyList_GetItem(fPPermute,permIter)));
-                }
-                switch(fNodeDType){
-                case ETensorType::FLOAT: {
-                std::unique_ptr<ROperator> op;
-                op.reset(new ROperator_Transpose<float>(fAttributePermute, PyStringAsString(PyList_GetItem(fInputs,0)), PyStringAsString(PyList_GetItem(fOutputs,0))));
-                rmodel.AddOperator(std::move(op));
-                break;
-                }
-                default:
-                    throw std::runtime_error("TMVA::SOFIE - Unsupported - Operator Transpose does not yet support input type " + ConvertTypeToString(fNodeDType));
-                }
-                break;
-                }
-
-            default:
-                throw std::runtime_error("Node Error: TMVA SOFIE does not yet support node type " + fNodeType);
-            }
-            }
+        // Adding required routines for inference code generation
+        if(fNodeType == "onnx::Gemm"){
+            rmodel.AddBlasRoutines({"Gemm", "Gemv"});
+        }
+        rmodel.AddOperator(INTERNAL::MakePyTorchNode(fNode));
+    }
 
 
     //Extracting model weights to add the initialized tensors to the RModel
@@ -279,6 +364,29 @@ RModel Parse(std::string filename, std::vector<std::vector<size_t>> inputShapes,
     }
 
 
+    //Extracting Input tensor info
+    PyRunString("inputs=[x for x in model.graph.inputs()]",fGlobalNS,fLocalNS);
+    PyRunString("inputs=inputs[1:]",fGlobalNS,fLocalNS);
+    PyRunString("inputNames=[x.debugName() for x in inputs]",fGlobalNS,fLocalNS);
+    PyObject* fPInputs= PyDict_GetItemString(fLocalNS,"inputNames");
+    std::string fInputName;
+    std::vector<size_t>fInputShape;
+    ETensorType fInputDType;
+    for(Py_ssize_t inputIter=0; inputIter<PyList_Size(fPInputs);++inputIter){
+        fInputName  = PyStringAsString(PyList_GetItem(fPInputs,inputIter));
+        fInputShape = inputShapes[inputIter];
+        fInputDType = inputDTypes[inputIter];
+        switch(fInputDType){
+            case(ETensorType::FLOAT): {
+                rmodel.AddInputTensorInfo(fInputName, ETensorType::FLOAT, fInputShape);
+                break;
+            }
+            default:
+                throw std::runtime_error("Type Error: TMVA SOFIE does not yet support the input tensor data type"+ConvertTypeToString(fInputDType));
+        }
+    }
+
+
     //Extracting output tensor names
     PyRunString("outputs=[x for x in graph[0].outputs()]",fGlobalNS,fLocalNS);
     PyRunString("outputNames=[x.debugName() for x in outputs]",fGlobalNS,fLocalNS);
@@ -292,11 +400,24 @@ RModel Parse(std::string filename, std::vector<std::vector<size_t>> inputShapes,
     return rmodel;
 }
 
+//////////////////////////////////////////////////////////////////////////////////
+/// \brief Overloaded Parser function for translating PyTorch .pt model to RModel
+///        object
+///
+/// \param[in] filename file location of PyTorch .pt model
+/// \param[in] inputShapes vector of input shape vectors
+/// \return    RModel Parsed RModel object
+///
+/// Overloaded Parser function for translating PyTorch .pt model to RModel object.
+/// Function only requires the inputShapes vector as a parameter. Function
+/// builds the vector of Data-types for the input tensors using Float as default,
+/// Function calls the `Parse()` function with the vector of data-types included,
+/// subsequently returning the parsed RModel object.
 RModel Parse(std::string filepath,std::vector<std::vector<size_t>> inputShapes){
       std::vector<ETensorType> dtype(inputShapes.size(),ETensorType::FLOAT);
       return Parse(filepath,inputShapes,dtype);
-    }
 }
-}
-}
-}
+}//PyTorch
+}//SOFIE
+}//Experimental
+}//TMVA
