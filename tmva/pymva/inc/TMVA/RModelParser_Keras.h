@@ -35,6 +35,8 @@
 #include "TMVA/Types.h"
 #include "TMVA/OperatorList.hxx"
 
+#include "TMVA/PyMethodBase.h"
+
 #include "Rtypes.h"
 #include "TString.h"
 
@@ -42,40 +44,61 @@
 namespace TMVA{
 namespace Experimental{
 namespace SOFIE{
+namespace PyKeras{
 
-enum class LayerType{
-   DENSE = 0, ACTIVATION = 1, RELU = 2, TRANSPOSE = 3 //order sensitive
 
-};
+// Referencing Python utility functions present in PyMethodBase
+static void(& PyRunString)(TString, PyObject*, PyObject*) = PyMethodBase::PyRunString;
+static const char*(& PyStringAsString)(PyObject*) = PyMethodBase::PyStringAsString;
+
 
 namespace INTERNAL{
-   std::unique_ptr<ROperator> make_ROperator_Gemm(std::string input,std::string output,std::string kernel,std::string bias,std::string dtype);
-   std::unique_ptr<ROperator> make_ROperator_Relu(std::string input, std::string output, std::string dtype);
-   std::unique_ptr<ROperator> make_ROperator_Transpose(std::string input, std::string output, std::vector<int_t> dims, std::string dtype);
+   // For adding Keras layer into RModel object
+   void AddKerasLayer(RModel& rmodel, PyObject* fLayer);
 
-   const std::unordered_map<std::string, LayerType> Type =
+
+   // Declaring Internal Functions for Keras layers which don't have activation as an additional attribute
+   std::unique_ptr<ROperator> MakeKerasActivation(PyObject* fLayer);  // For instantiating ROperator for Keras Activation Layer
+   std::unique_ptr<ROperator> MakeKerasReLU(PyObject* fLayer);       // For instantiating ROperator for Keras ReLU layer
+   std::unique_ptr<ROperator> MakeKerasPermute(PyObject* fLayer);   // For instantiating ROperator for Keras Permute Layer
+
+
+   // Declaring Internal function for Keras layers which have additional activation attribute
+   std::unique_ptr<ROperator> MakeKerasDense(PyObject* fLayer);   // For instantiating ROperator for Keras Dense Layer
+
+   // For mapping Keras layer with the preparatory functions for ROperators
+   using KerasMethodMap = std::unordered_map<std::string, std::unique_ptr<ROperator> (*)(PyObject* fLayer)>;
+   using KerasMethodMapWithActivation = std::unordered_map<std::string, std::unique_ptr<ROperator>(*)(PyObject* fLayer)>;
+
+   const KerasMethodMap mapKerasLayer =
     {
-        {"'Dense'", LayerType::DENSE},
-        {"'Activation'", LayerType::ACTIVATION},
-        {"'ReLU'", LayerType::RELU},
-        {"'Permute'", LayerType::TRANSPOSE}
+        {"Activation", &MakeKerasActivation},
+        {"Permute", &MakeKerasPermute},
+
+        //For activation layers
+        {"ReLU", &MakeKerasReLU},
+
+        //For layers with activation attributes
+        {"relu", &MakeKerasReLU}
     };
 
-  const std::unordered_map<std::string, LayerType> ActivationType =
+    const KerasMethodMapWithActivation mapKerasLayerWithActivation =
     {
-        {"'relu'", LayerType::RELU},
+        {"Dense", &MakeKerasDense},
     };
 
-}
+    // Function which returns values from a Python Tuple object in vector of size_t
+    std::vector<size_t> GetShapeFromTuple(PyObject* shapeTuple);
 
-namespace PyKeras{
-    void PyRunString(TString code, PyObject *fGlobalNS, PyObject *fLocalNS);
-    const char* PyStringAsString(PyObject* str);
-    std::vector<size_t> getShapeFromTuple(PyObject* shapeTuple);
-    RModel Parse(std::string filepath);
-  };
-}
-}
-}
+}//INTERNAL
 
+/// Parser function for translatng Keras .h5 model into a RModel object.
+/// Accepts the file location of a Keras model and returns the
+/// equivalent RModel object.
+RModel Parse(std::string filename);
+
+}//PyKeras
+}//SOFIE
+}//Experimental
+}//TMVA
 #endif //TMVA_PYMVA_RMODELPARSER_KERAS
