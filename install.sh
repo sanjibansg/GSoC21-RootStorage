@@ -69,6 +69,11 @@ cp tmva/tmva/inc/TMVA/RootStorageBDT.h root/tmva/tmva/inc/TMVA/
 # Copying Source files for TMVA
 cp tmva/tmva/src/RootStorageBDT.cxx root/tmva/tmva/src/
 
+# Copying the Tutorial files
+cp tutorials/tmva/TMVA_SOFIE_ONNX.C root/tutorials/tmva/
+cp tutorials/tmva/TMVA_SOFIE_Keras.C root/tutorials/tmva/
+cp tutorials/tmva/TMVA_SOFIE_PyTorch.C root/tutorials/tmva/
+
 # Making the Build & Install directory
 mkdir build install && cd build
 
